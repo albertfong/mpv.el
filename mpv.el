@@ -108,12 +108,41 @@ The hook will be called with the arguments passed to `mpv-start'."
   :type 'hook
   :group 'mpv)
 
+(defcustom mpv-winsocat-executable "winsocat.exe"
+  "Name or path to the winsocat executable."
+  :type 'file
+  :group 'mpv)
+
 (defvar mpv--process nil)
 (defvar mpv--queue nil)
+(defvar mpv--winsocat nil)
 
 (defun mpv-live-p ()
   "Return non-nil if inferior mpv is running."
   (and mpv--process (eq (process-status mpv--process) 'run)))
+
+(defun mpv--winsocat-live-p ()
+  "Return non-nill if winsocat is running."
+  (and mpv--winsocat (eq (process-status mpv--winsocat) 'run)))
+
+(defun mpv--make-queue (socket)
+  (with-timeout
+      (mpv-start-timeout (mpv-kill)
+                         (error "Failed to connect to mpv"))
+    (while (not (file-exists-p socket))
+      (sleep-for 0.05)))
+  (setq mpv--queue (tq-create
+                    (make-network-process :name "mpv-socket"
+                                          :family 'local
+                                          :service socket))))
+
+(defun mpv--make-queue-windows (pipename)
+  (setq mpv--winsocat
+        (funcall #'start-process "mpv-winsocat" nil mpv-winsocat-executable
+                 (concat "NPIPE:" pipename)
+                 "STDIO"))
+  (set-process-query-on-exit-flag mpv--winsocat nil)
+  (setq mpv--queue (tq-create mpv--winsocat)))
 
 (defun mpv-start (&rest args)
   "Start an mpv process with the specified ARGS.
@@ -122,12 +151,13 @@ If there already is an mpv process controlled by this Emacs instance,
 it will be killed.  Options specified in `mpv-default-options' will be
 prepended to ARGS."
   (mpv-kill)
-  (let ((socket (make-temp-name
-                 (expand-file-name "mpv-" temporary-file-directory))))
+  (let* ((socket (make-temp-name
+                  (expand-file-name "mpv-" temporary-file-directory)))
+         (socket-name (file-name-nondirectory socket)))
     (setq mpv--process
           (apply #'start-process "mpv-player" nil mpv-executable
                  "--no-terminal"
-                 (concat "--input-ipc-server=" socket)
+                 (concat "--input-ipc-server=" (if (eq system-type 'windows-nt) socket-name socket))
                  (append mpv-default-options args)))
     (set-process-query-on-exit-flag mpv--process nil)
     (set-process-sentinel
@@ -138,15 +168,11 @@ prepended to ARGS."
          (when (file-exists-p socket)
            (with-demoted-errors (delete-file socket)))
          (run-hooks 'mpv-on-exit-hook))))
-    (with-timeout
-        (mpv-start-timeout (mpv-kill)
-                           (error "Failed to connect to mpv"))
-      (while (not (file-exists-p socket))
-        (sleep-for 0.05)))
-    (setq mpv--queue (tq-create
-                      (make-network-process :name "mpv-socket"
-                                            :family 'local
-                                            :service socket)))
+
+    (pcase system-type
+      ('windows-nt (mpv--make-queue-windows socket-name))
+      (_ (mpv--make-queue socket)))
+
     (set-process-filter
      (tq-process mpv--queue)
      (lambda (_proc string)
@@ -530,14 +556,17 @@ do so."
   (interactive)
   (when mpv--queue
     (tq-close mpv--queue))
+  (when (mpv--winsocat-live-p)
+    (kill-process mpv--winsocat))
   (when (mpv-live-p)
     (kill-process mpv--process))
   (with-timeout
       (0.5 (error "Failed to kill mpv"))
-    (while (mpv-live-p)
+    (while (or (mpv-live-p) (mpv--winsocat-live-p))
       (sleep-for 0.05)))
   (setq mpv--process nil)
-  (setq mpv--queue nil))
+  (setq mpv--queue nil)
+  (setq mpv--winsocat nil))
 
 ;;;###autoload
 (defun mpv-pause ()
