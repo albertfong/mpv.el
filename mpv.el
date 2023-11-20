@@ -170,7 +170,7 @@ prepended to ARGS."
          (run-hooks 'mpv-on-exit-hook))))
 
     (pcase system-type
-      (windows-nt (mpv--make-queue-windows socket-name))
+      ('windows-nt (mpv--make-queue-windows socket-name))
       (_ (mpv--make-queue socket)))
 
     (set-process-filter
